@@ -1,0 +1,42 @@
+name: Checks and Windows preview
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  test:
+    strategy:
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    env:
+      QT_QPA_PLATFORM: offscreen
+      QT_QUICK_BACKEND: software
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install Qt libraries
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y libegl1 libopengl0
+      - run: python -m pip install -e ".[dev]"
+      - run: python -m pytest -q
+      - run: python run.py --smoke
+      - name: Build Windows portable preview
+        if: runner.os == 'Windows'
+        run: python -m PyInstaller --noconfirm --windowed --name FileDesk --collect-data filedesk run.py
+      - name: Smoke test packaged app
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $process = Start-Process -FilePath dist/FileDesk/FileDesk.exe -ArgumentList '--smoke' -PassThru
+          if (-not $process.WaitForExit(30000)) { $process.Kill(); throw 'Application did not exit' }
+          if ($process.ExitCode -ne 0) { throw "Application failed: $($process.ExitCode)" }
+      - uses: actions/upload-artifact@v4
+        if: runner.os == 'Windows'
+        with:
+          name: FileDesk-Windows-preview
+          path: dist/FileDesk/
