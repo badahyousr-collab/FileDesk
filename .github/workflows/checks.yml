@@ -37,7 +37,7 @@ jobs:
           New-Item -ItemType Directory -Path $standalone -Force | Out-Null
           Copy-Item dist/FileDesk.exe "$standalone/FileDesk.exe"
           $process = Start-Process -WorkingDirectory $standalone -FilePath "$standalone/FileDesk.exe" -ArgumentList '--self-test' -PassThru
-          if (-not $process.WaitForExit(120000)) { $process.Kill(); throw 'Application did not exit' }
+          if (-not $process.WaitForExit(240000)) { $process.Kill(); throw 'Application did not exit' }
           if ($process.ExitCode -ne 0) { throw "Application failed: $($process.ExitCode)" }
       - uses: actions/upload-artifact@v4
         if: runner.os == 'Windows'

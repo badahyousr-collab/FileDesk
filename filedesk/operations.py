@@ -202,6 +202,8 @@ def move_no_replace(src: Path, dst: Path):
 class Journal:
     def __init__(self, path: Path):
         self.db = sqlite3.connect(path)
+        self.db.execute("PRAGMA journal_mode=WAL")
+        self.db.execute("PRAGMA synchronous=FULL")
         self.db.executescript("""
         CREATE TABLE IF NOT EXISTS batches (
             id INTEGER PRIMARY KEY, created TEXT NOT NULL, state TEXT NOT NULL);

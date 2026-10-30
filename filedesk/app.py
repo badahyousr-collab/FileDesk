@@ -61,6 +61,7 @@ class Backend(QObject):
         self._running = False
         self._status = "Добавьте файлы или папку"
         self._rows = []
+        self._display_rows = []
         self._history = []
         self._can_undo = False
         self._ready = False
@@ -101,7 +102,7 @@ class Backend(QObject):
     def status(self): return self._status
 
     @Property('QVariantList', notify=rowsChanged)
-    def rows(self): return self._demo_rows if self._demo else self._rows
+    def rows(self): return self._demo_rows if self._demo else self._display_rows
 
     @Property('QVariantList', notify=historyChanged)
     def history(self): return self._demo_history if self._demo else self._history
@@ -293,6 +294,9 @@ class Backend(QObject):
 
     def set_rows(self, rows):
         self._rows = rows
+        # Windows file IDs can exceed Qt's signed 64-bit QVariant limit.
+        # Keep fingerprints in Python only; QML needs presentation fields.
+        self._display_rows = [{key: value for key, value in row.items() if key != 'stamp'} for row in rows]
         self.rowsChanged.emit()
         self.changed.emit()
 
@@ -380,7 +384,7 @@ class Backend(QObject):
                     row['status'] = 'Отменено'
                     row['error'] = ''
             self._ready = False
-            self.rowsChanged.emit()
+            self.set_rows(self._rows)
             self._status = f"Восстановлено имён: {len(restored)}. Подробности и конфликты — в истории."
         self.launch(action, accept, "Проверяю файлы перед отменой…")
 
@@ -407,7 +411,7 @@ class Backend(QObject):
             return
         if not self._running and 0 <= index < len(self._rows):
             self._rows.pop(index)
-            self.rowsChanged.emit()
+            self.set_rows(self._rows)
             self._ready = False
             self.changed.emit()
             self.preview()

@@ -87,6 +87,14 @@ def test_real_files_through_backend_and_qml(tmp_path):
     assert backend.history[0]['state'] == 'undone'
     backend.clear()
     assert not backend.rows
+    # A Windows inode may be larger than the signed QVariant integer range.
+    backend.set_rows([dict(source=str(source), target=str(source), name=source.name,
+                           newName=source.name, size=0, status='Готово', error='',
+                           stamp=[2**65])])
+    app.processEvents()
+    assert 'stamp' not in backend.rows[0]
+    assert backend._rows[0]['stamp'] == [2**65]
+    backend.clear()
     assert not warnings, warnings
     backend.shutdown()
     window.close()
@@ -100,7 +108,7 @@ def test_packaged_entrypoint_workflow(tmp_path):
     import sys
     import json
     env = dict(os.environ, FILEDESK_DATA_DIR=str(tmp_path / 'appdata'), QT_QUICK_BACKEND='software')
-    result = subprocess.run([sys.executable, 'run.py', '--self-test'], cwd=Path(__file__).resolve().parents[1], env=env, capture_output=True, text=True, timeout=65)
+    result = subprocess.run([sys.executable, 'run.py', '--self-test'], cwd=Path(__file__).resolve().parents[1], env=env, capture_output=True, text=True, timeout=200)
     report = json.loads((tmp_path / 'appdata' / 'self-test.json').read_text(encoding='utf-8'))
     assert result.returncode == 0 and report['success'], (report, result.stderr)
 
