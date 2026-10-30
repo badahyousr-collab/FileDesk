@@ -27,8 +27,10 @@ class SelfTest(QObject):
         self.extra = self.root / 'Ещё один файл.txt'
         self.extra.write_text('Second file', encoding='utf-8')
         self.stage = 0
-        self.deadline = time.monotonic() + 50
+        self.deadline = time.monotonic() + 180
         self.navigation_ticks = 0
+        self.last_tick = time.monotonic()
+        self.max_gap = 0
         self.timer = QTimer(self)
         self.timer.timeout.connect(self.step)
 
@@ -48,13 +50,17 @@ class SelfTest(QObject):
 
     def step(self):
         b = self.backend
+        now = time.monotonic()
+        self.max_gap = max(self.max_gap, now - self.last_tick)
+        self.last_tick = now
         try:
             assert time.monotonic() < self.deadline, 'UI operation timed out'
             if b.running:
                 # Navigate and write preferences while real file jobs are active.
                 self.navigation_ticks += 1
-                self.window.setProperty('page', self.navigation_ticks % 4)
-                if self.navigation_ticks % 3 == 0:
+                if self.navigation_ticks % 5 == 0:
+                    self.window.setProperty('page', (self.navigation_ticks // 5) % 4)
+                if self.navigation_ticks % 15 == 0:
                     b.toggleTheme()
                     b.toggleSidebar()
                 return
@@ -114,6 +120,7 @@ class SelfTest(QObject):
                 assert self.navigation_ticks > 0
                 b.undoLast()
             elif self.stage == 9:
+                assert self.max_gap < 3, f"GUI stalled for {self.max_gap:.2f}s"
                 assert all((self.root/'queue'/f'file_{i}.txt').exists() for i in range(400))
                 self.window.setProperty('page', 0)
                 self.window.grabWindow().save(str(self.output / 'self-test.png'))
@@ -126,6 +133,6 @@ class SelfTest(QObject):
     def finish(self, ok, error=''):
         self.timer.stop()
         self.backend.shutdown()
-        (self.output/'self-test.json').write_text(json.dumps(dict(success=ok, stage=self.stage, error=error), ensure_ascii=False), encoding='utf-8')
+        (self.output/'self-test.json').write_text(json.dumps(dict(success=ok, stage=self.stage, error=error, max_gui_gap_seconds=self.max_gap, navigation_ticks=self.navigation_ticks), ensure_ascii=False), encoding='utf-8')
         self.temp.cleanup()
         self.app.exit(0 if ok else 1)

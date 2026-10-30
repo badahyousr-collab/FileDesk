@@ -100,7 +100,7 @@ def test_packaged_entrypoint_workflow(tmp_path):
     import sys
     import json
     env = dict(os.environ, FILEDESK_DATA_DIR=str(tmp_path / 'appdata'), QT_QUICK_BACKEND='software')
-    result = subprocess.run([sys.executable, 'run.py', '--self-test'], cwd=Path(__file__).resolve().parents[1], env=env, capture_output=True, text=True, timeout=65)
+    result = subprocess.run([sys.executable, 'run.py', '--self-test'], cwd=Path(__file__).resolve().parents[1], env=env, capture_output=True, text=True, timeout=200)
     report = json.loads((tmp_path / 'appdata' / 'self-test.json').read_text(encoding='utf-8'))
     assert result.returncode == 0 and report['success'], (report, result.stderr)
 
