@@ -19,6 +19,16 @@ from pathlib import Path
 from typing import Callable
 
 
+def friendly_error(exc):
+    if isinstance(exc, FileNotFoundError):
+        return "Файл или папка больше не существует. Добавьте файлы заново."
+    if isinstance(exc, PermissionError) or getattr(exc, "winerror", None) in (5, 32, 33):
+        return "Нет доступа или файл открыт другой программой. Закройте его и проверьте права на папку."
+    if isinstance(exc, FileExistsError):
+        return "Такое имя уже занято. Измените имя или начальный номер."
+    return str(exc)
+
+
 class Cancelled(Exception):
     pass
 
@@ -58,7 +68,7 @@ def discover(paths, cancel: threading.Event):
             elif stat.S_ISREG(info.st_mode):
                 files.append(str(path.absolute()))
         except OSError as exc:
-            problems.append(f"{path}: {exc}")
+            problems.append(f"{path}: {friendly_error(exc)}")
 
     for item in paths:
         path = Path(item).absolute()
@@ -144,7 +154,7 @@ def plan(paths: list[str], options: dict, cancel: threading.Event):
                     raise ValueError("Имя уже занято (включая другой регистр)")
                 row["status"] = "Готов к запуску"
         except (OSError, ValueError, KeyError) as exc:
-            row.update(status="Ошибка", error=str(exc))
+            row.update(status="Ошибка", error=friendly_error(exc))
         rows.append(row)
     counts = Counter(path_key(Path(row["target"])) for row in rows if row["target"])
     for row in rows:
@@ -273,7 +283,7 @@ def execute(rows: list[dict], journal: Journal, cancel: threading.Event, progres
                     if change is not None:
                         journal.state(change, "skipped")
                 except (OSError, ValueError) as exc:
-                    row.update(status="Ошибка", error=str(exc))
+                    row.update(status="Ошибка", error=friendly_error(exc))
                     if change is None:
                         change = journal.add(batch, row["source"], row["target"], {})
                     journal.state(change, "uncertain" if moved else "failed", str(exc))

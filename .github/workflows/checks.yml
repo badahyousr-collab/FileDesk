@@ -28,15 +28,21 @@ jobs:
       - name: Build Windows portable preview
         if: runner.os == 'Windows'
         run: python -m PyInstaller --noconfirm --windowed --name FileDesk --collect-data filedesk run.py
-      - name: Smoke test packaged app
+      - name: Test packaged UI import, rename, history and undo
         if: runner.os == 'Windows'
         shell: pwsh
         run: |
-          $process = Start-Process -FilePath dist/FileDesk/FileDesk.exe -ArgumentList '--smoke' -PassThru
-          if (-not $process.WaitForExit(30000)) { $process.Kill(); throw 'Application did not exit' }
+          $env:FILEDESK_DATA_DIR = "$env:RUNNER_TEMP/FileDesk-selftest"
+          $process = Start-Process -FilePath dist/FileDesk/FileDesk.exe -ArgumentList '--self-test' -PassThru
+          if (-not $process.WaitForExit(60000)) { $process.Kill(); throw 'Application did not exit' }
           if ($process.ExitCode -ne 0) { throw "Application failed: $($process.ExitCode)" }
       - uses: actions/upload-artifact@v4
         if: runner.os == 'Windows'
         with:
           name: FileDesk-Windows-preview
           path: dist/FileDesk/
+      - uses: actions/upload-artifact@v4
+        if: runner.os == 'Windows' && always()
+        with:
+          name: FileDesk-selftest-report
+          path: ${{ runner.temp }}/FileDesk-selftest/

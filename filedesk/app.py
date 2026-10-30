@@ -2,14 +2,20 @@ import os
 import sys
 import threading
 import time
+import logging
+import re
+from datetime import datetime, timezone
+from collections import Counter
+from logging.handlers import RotatingFileHandler
 from pathlib import Path
 
 from PySide6.QtCore import QObject, Property, Signal, Slot, QStandardPaths, QTimer, QUrl, QThread
-from PySide6.QtGui import QGuiApplication
+from PySide6.QtGui import QDesktopServices
+from PySide6.QtWidgets import QApplication, QFileDialog
 from PySide6.QtQml import QQmlApplicationEngine
 
 from filedesk.settings import Settings
-from filedesk.operations import Journal, Cancelled, discover, plan, execute, undo
+from filedesk.operations import Journal, Cancelled, discover, plan, execute, undo, render_name, friendly_error
 
 
 class Task(QThread):
@@ -35,7 +41,8 @@ class Task(QThread):
         except Cancelled:
             self.failed.emit("Операция остановлена")
         except Exception as exc:
-            self.failed.emit(str(exc))
+            logging.getLogger("filedesk").exception("Background operation failed")
+            self.failed.emit(friendly_error(exc))
 
 
 class Backend(QObject):
@@ -56,7 +63,13 @@ class Backend(QObject):
         self._can_undo = False
         self._ready = False
         self._task = None
-        self.options = dict(template="{name}", start=1, find="", replace="")
+        self._demo = False
+        self._demo_rows = []
+        self._demo_history = []
+        self._demo_before = []
+        self._demo_last_records = []
+        self._notice = ""
+        self.options = dict(template="{name}_{n:03d}", start=1, find="", replace="")
         self.preview_timer = QTimer(self)
         self.preview_timer.setSingleShot(True)
         self.preview_timer.setInterval(350)
@@ -86,17 +99,73 @@ class Backend(QObject):
     def status(self): return self._status
 
     @Property('QVariantList', notify=rowsChanged)
-    def rows(self): return self._rows
+    def rows(self): return self._demo_rows if self._demo else self._rows
 
     @Property('QVariantList', notify=historyChanged)
-    def history(self): return self._history
+    def history(self): return self._demo_history if self._demo else self._history
 
     @Property(bool, notify=changed)
     def canRun(self):
-        return self._ready and not self._running and bool(self._rows) and not any(r['error'] for r in self._rows) and any(r['status'] == 'Готов к запуску' for r in self._rows)
+        return (self._demo or self._ready) and not self._running and bool(self.rows) and not any(r['error'] for r in self.rows) and any(r['status'] == 'Готов к запуску' for r in self.rows)
 
     @Property(bool, notify=changed)
-    def canUndo(self): return self._can_undo and not self._running
+    def canUndo(self): return (bool(self._demo_before) if self._demo else self._can_undo) and not self._running
+
+    @Property(bool, notify=changed)
+    def demo(self): return self._demo
+
+    @Property(str, notify=changed)
+    def notice(self): return self._notice
+
+    @Property(int, notify=changed)
+    def readyCount(self): return sum(r['status'] == 'Готов к запуску' for r in self.rows)
+
+    @Property(str, notify=changed)
+    def actionHint(self):
+        if self._running:
+            return self._status
+        if not self.rows:
+            return "Выберите файлы или перетащите их в окно"
+        if any(r['error'] for r in self.rows):
+            return "Исправьте отмеченные строки или уберите их из списка"
+        if self.canRun:
+            return f"Будет переименовано: {self.readyCount}. Содержимое файлов не изменится."
+        if any(r['status'] in ('Готово', 'Отменено') for r in self.rows):
+            return self._status
+        return "Новые имена совпадают с исходными. Измените настройки справа."
+
+    @Slot()
+    def dismissNotice(self):
+        self._notice = ""
+        self.changed.emit()
+
+    @Slot()
+    def chooseFiles(self):
+        if self._running:
+            return
+        try:
+            selected, _ = QFileDialog.getOpenFileNames(None, "Добавить файлы в FileDesk", self.settings.get("last_directory", ""), "Все файлы (*)")
+            if selected:
+                self.settings.set("last_directory", str(Path(selected[0]).parent))
+                self.addPaths(selected)
+        except Exception as exc:
+            self.task_error(friendly_error(exc))
+
+    @Slot()
+    def chooseFolder(self):
+        if self._running:
+            return
+        try:
+            selected = QFileDialog.getExistingDirectory(None, "Добавить папку в FileDesk", self.settings.get("last_directory", ""))
+            if selected:
+                self.settings.set("last_directory", selected)
+                self.addPaths([selected])
+        except Exception as exc:
+            self.task_error(friendly_error(exc))
+
+    @Slot()
+    def openLogs(self):
+        QDesktopServices.openUrl(QUrl.fromLocalFile(str(self.settings.path.parent)))
 
     @Slot()
     def toggleTheme(self):
@@ -126,6 +195,7 @@ class Backend(QObject):
         self._running = True
         self._progress = 0
         self._status = message
+        self._notice = ""
         self.preview_timer.stop()
         task = Task(action, self)
         self._task = task
@@ -146,6 +216,7 @@ class Backend(QObject):
     def task_error(self, message):
         self._ready = False
         self._status = message
+        self._notice = message
         self.changed.emit()
 
     @Slot(int, int)
@@ -165,26 +236,54 @@ class Backend(QObject):
 
     @Slot('QVariantList')
     def addUrls(self, urls):
+        # Compatibility for callers using Qt URL objects.
+        if hasattr(urls, 'toVariant'):
+            urls = urls.toVariant()
+        self.addPaths([u.toString() if isinstance(u, QUrl) else str(u) for u in urls])
+
+    @Slot('QStringList')
+    def addPaths(self, values):
         if self._running:
+            self._notice = "Дождитесь окончания текущей операции или остановите её."
+            self.changed.emit()
             return
         paths = []
-        for value in urls:
-            url = value if isinstance(value, QUrl) else QUrl(str(value))
-            if url.isLocalFile():
-                paths.append(url.toLocalFile())
+        invalid = []
+        for value in values:
+            if not value:
+                continue
+            # Native dialogs return paths; drag-and-drop returns file: URLs.
+            if value.lower().startswith("file:"):
+                url = QUrl(value)
+                if url.isLocalFile():
+                    paths.append(url.toLocalFile())
+                else:
+                    invalid.append(value)
+            elif re.match(r'^[a-zA-Z]:[\\/]', value) or value.startswith(("/", "\\")):
+                paths.append(value)
+            else:
+                invalid.append(value)
         if not paths:
+            self.task_error("Не удалось получить пути к файлам. Используйте кнопку «Добавить файлы»." if invalid else "Файлы не выбраны.")
             return
+        if self._demo:
+            self.setDemo(False)
         existing = [r['source'] for r in self._rows]
         options = dict(self.options)
         def action(cancel, report):
             found, problems = discover(existing + paths, cancel)
-            return plan(found, options, cancel), problems
+            return plan(found, options, cancel), problems + ["Неподдерживаемый путь: " + p for p in invalid]
         def accept(value):
             rows, problems = value
             self.set_rows(rows)
             self._ready = True
-            self._status = f"Добавлено файлов: {len(rows)}" + (f". Предупреждений: {len(problems)}. {problems[0]}" if problems else "")
-        self.launch(action, accept, "Читаю список файлов…")
+            self._status = f"В очереди файлов: {len(rows)}"
+            if problems:
+                self._notice = "\n".join(problems[:20])
+            elif not rows:
+                self._notice = "В выбранной папке нет доступных файлов. Выберите другую папку или отдельные файлы."
+            self.changed.emit()
+        self.launch(action, accept, "Добавляю файлы…")
 
     def set_rows(self, rows):
         self._rows = rows
@@ -197,11 +296,17 @@ class Backend(QObject):
             return
         self.options = dict(template=template, start=start, find=find, replace=replace)
         self._ready = False
-        self.changed.emit()
-        self.preview_timer.start()
+        if self._demo:
+            self.preview_demo()
+        else:
+            self.changed.emit()
+            self.preview_timer.start()
 
     @Slot()
     def preview(self):
+        if self._demo:
+            self.preview_demo()
+            return
         if self._running or not self._rows:
             return
         paths = [r['source'] for r in self._rows]
@@ -215,6 +320,9 @@ class Backend(QObject):
 
     @Slot()
     def rename(self):
+        if self._demo:
+            self.startDemo()
+            return
         if not self.canRun:
             return
         rows = [dict(r) for r in self._rows]
@@ -235,6 +343,18 @@ class Backend(QObject):
 
     @Slot()
     def undoLast(self):
+        if self._demo:
+            if self.canUndo:
+                self._demo_rows = [dict(r, status="Отменено") for r in self._demo_before]
+                self._demo_before = []
+                for record in self._demo_last_records:
+                    if record['state'] == 'done':
+                        record['state'] = 'undone'
+                self._status = "Демо: исходные имена восстановлены"
+                self.rowsChanged.emit()
+                self.historyChanged.emit()
+                self.changed.emit()
+            return
         if not self.canUndo:
             return
         def action(cancel, report):
@@ -260,6 +380,11 @@ class Backend(QObject):
 
     @Slot()
     def clear(self):
+        if self._demo and not self._running:
+            self._demo_rows = []
+            self.rowsChanged.emit()
+            self.changed.emit()
+            return
         if not self._running:
             self.preview_timer.stop()
             self.set_rows([])
@@ -269,6 +394,11 @@ class Backend(QObject):
 
     @Slot(int)
     def remove(self, index):
+        if self._demo and not self._running:
+            if 0 <= index < len(self._demo_rows):
+                self._demo_rows.pop(index)
+                self.preview_demo()
+            return
         if not self._running and 0 <= index < len(self._rows):
             self._rows.pop(index)
             self.rowsChanged.emit()
@@ -292,22 +422,70 @@ class Backend(QObject):
             self._task.cancel.set()
             self._task.wait()
 
+    @Slot(bool)
+    def setDemo(self, enabled):
+        if self._running or enabled == self._demo:
+            return
+        self.preview_timer.stop()
+        self._demo = enabled
+        self._notice = ""
+        self._progress = 0
+        if enabled:
+            self._demo_rows = [dict(name=name, source="Демо / " + name, size=size, newName=name, target="", status="", error="") for name, size in [("Фото_лето.jpg", 2400000), ("Обложка.png", 840000), ("Заметки.txt", 12000)]]
+            self._demo_before = []
+            self.preview_demo()
+            self._status = "Демо: примеры не связаны с файлами на компьютере"
+        else:
+            self._status = "Выберите файлы или папку"
+            if self._rows:
+                self.preview()
+        self.rowsChanged.emit()
+        self.historyChanged.emit()
+        self.changed.emit()
+
+    def preview_demo(self):
+        for index, row in enumerate(self._demo_rows):
+            try:
+                if not 1 <= int(self.options['start']) <= 999999:
+                    raise ValueError("Первый номер должен быть от 1 до 999999")
+                name = render_name(Path(row['name']), self.options['start'] + index, self.options, time.time())
+                row.update(newName=name, target="Демо / " + name, error="", status="Без изменений" if name == row['name'] else "Готов к запуску")
+            except (ValueError, KeyError) as exc:
+                row.update(newName="", status="Ошибка", error=str(exc))
+        counts = Counter(r['newName'].casefold() for r in self._demo_rows if r['newName'])
+        for row in self._demo_rows:
+            if counts[row['newName'].casefold()] > 1:
+                row.update(status="Ошибка", error="Несколько файлов получат одно имя")
+        self.rowsChanged.emit()
+        self.changed.emit()
+
     @Slot()
     def startDemo(self):
-        if self._running:
+        if not self._demo or not self.canRun:
             return
+        self._demo_last_records = []
+        self._demo_before = [dict(r) for r in self._demo_rows]
         self._progress = 0
         self._running = True
-        self._status = "Демонстрация: файлы на диске не изменяются"
+        self._status = "Демо: переименование примеров…"
         self.timer.start()
         self.changed.emit()
 
     def tick(self):
-        self._progress = min(100, self._progress + 4)
+        self._progress = min(100, self._progress + 10)
         if self._progress == 100:
             self.timer.stop()
             self._running = False
-            self._status = "Демонстрация завершена · 3 примера, 1 ошибка"
+            for row in self._demo_rows:
+                if row['status'] == 'Готов к запуску':
+                    record = dict(source=row['source'], target=row['target'], state="done", error="", created=datetime.now(timezone.utc).isoformat(), demo=True)
+                    self._demo_history.insert(0, record)
+                    self._demo_last_records.append(record)
+                    row.update(source=row['target'], name=row['newName'], status="Готово")
+            self._demo_history = self._demo_history[:1000]
+            self._status = "Демо завершено. Результат сохранён в демонстрационной истории."
+            self.rowsChanged.emit()
+            self.historyChanged.emit()
         self.changed.emit()
 
     @Slot()
@@ -321,11 +499,15 @@ class Backend(QObject):
 
 
 def main():
-    app = QGuiApplication(sys.argv)
+    app = QApplication(sys.argv)
     app.setOrganizationName("pipisso")
     app.setApplicationName("FileDesk")
-    app.setApplicationVersion("0.2.0")
+    app.setApplicationVersion("0.3.0")
     base = Path(os.environ.get("FILEDESK_DATA_DIR") or QStandardPaths.writableLocation(QStandardPaths.AppLocalDataLocation))
+    base.mkdir(parents=True, exist_ok=True)
+    handler = RotatingFileHandler(base / "filedesk.log", maxBytes=1024 * 1024, backupCount=2, encoding="utf-8")
+    handler.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(message)s"))
+    logging.getLogger("filedesk").addHandler(handler)
     settings = Settings(base / "filedesk.sqlite3")
     backend = Backend(settings)
     app.aboutToQuit.connect(backend.shutdown)
@@ -335,7 +517,10 @@ def main():
     if not engine.rootObjects():
         settings.close()
         return 1
-    if "--smoke" in sys.argv:
+    if "--self-test" in sys.argv:
+        from filedesk.selftest import start_self_test
+        start_self_test(app, backend, engine.rootObjects()[0], base)
+    elif "--smoke" in sys.argv:
         QTimer.singleShot(800, app.quit)
     result = app.exec()
     del engine
