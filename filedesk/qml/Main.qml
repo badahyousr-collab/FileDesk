@@ -309,9 +309,11 @@ ApplicationWindow {
                             id: inspector
                             Layout.preferredWidth: win.width < 1160 ? 245 : 278; Layout.fillHeight: true
                             contentWidth: availableWidth
+                            contentHeight: inspectorColumn.implicitHeight + 50
                             clip: true
                             ScrollBar.vertical: Scroller {}
                             ColumnLayout {
+                                id: inspectorColumn
                                 width: inspector.availableWidth - 40; x: 20; y: 25
                                 spacing: 13
                                 TextLabel { text: "Переименование"; font.pixelSize: 15; font.weight: Font.DemiBold }
