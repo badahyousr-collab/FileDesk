@@ -28,7 +28,7 @@ Rectangle {
             grad.addColorStop(1, dark ? "#6e2328" : "#d8b3b4")
             c.fillStyle=grad; c.fillRect(0,0,w,h)
             let shade=c.createRadialGradient(w*.04,h*.03,0,w*.04,h*.03,Math.max(w*.85,h*.40))
-            shade.addColorStop(0, dark ? (deep ? "#270000" : "#591e25") : "#ffffff55")
+            shade.addColorStop(0, dark ? (deep ? "#270000" : "#591e25") : "rgba(255,255,255,0.33)")
             shade.addColorStop(1,"#00000000"); c.fillStyle=shade; c.fillRect(0,0,w,h)
             let base=c.createRadialGradient(w*.97,h*.97,0,w*.97,h*.97,Math.max(w*.9,h*.30))
             base.addColorStop(0,dark ? (deep ? "#190000" : "#3b0a13") : "#c28c8c")
