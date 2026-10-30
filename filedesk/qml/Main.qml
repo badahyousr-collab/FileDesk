@@ -430,7 +430,7 @@ ApplicationWindow {
                         Subtext { text: "Настройки и история сохраняются на вашем компьютере.\nЖурнал ошибок поможет разобраться, если файл не удалось обработать."; wrapMode: Text.WordWrap; Layout.fillWidth: true }
                         Action { text: "Открыть папку данных"; glyph: "folder"; onClicked: backend.openLogs() }
                         Item { Layout.fillHeight: true }
-                        Subtext { text: "pipisso FileDesk 0.3 · Работает без аккаунта и интернета" }
+                        Subtext { text: "pipisso FileDesk 0.3.1 · Работает без аккаунта и интернета" }
                     }
                     Separator { Layout.leftMargin: 26; Layout.rightMargin: 26 }
                     ColumnLayout {

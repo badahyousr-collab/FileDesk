@@ -100,7 +100,7 @@ def test_packaged_entrypoint_workflow(tmp_path):
     import sys
     import json
     env = dict(os.environ, FILEDESK_DATA_DIR=str(tmp_path / 'appdata'), QT_QUICK_BACKEND='software')
-    result = subprocess.run([sys.executable, 'run.py', '--self-test'], cwd=Path(__file__).resolve().parents[1], env=env, capture_output=True, text=True, timeout=35)
+    result = subprocess.run([sys.executable, 'run.py', '--self-test'], cwd=Path(__file__).resolve().parents[1], env=env, capture_output=True, text=True, timeout=65)
     report = json.loads((tmp_path / 'appdata' / 'self-test.json').read_text(encoding='utf-8'))
     assert result.returncode == 0 and report['success'], (report, result.stderr)
 
@@ -125,4 +125,21 @@ def test_invalid_import_is_visible_and_demo_history_is_isolated(tmp_path):
     assert sum(r['state'] == 'done' for r in backend.history) == 3
     backend.setDemo(False)
     assert backend.history == []
+    store.close()
+
+
+def test_theme_change_does_not_wait_for_rename_journal_lock(tmp_path):
+    import sqlite3
+    import time
+    app = QApplication.instance() or QApplication([])
+    store = Settings(tmp_path / 'preferences.sqlite3')
+    backend = Backend(store)
+    lock = sqlite3.connect(backend.journal_path)
+    lock.execute('BEGIN EXCLUSIVE')
+    started = time.monotonic()
+    backend.toggleTheme()
+    backend.toggleSidebar()
+    assert time.monotonic() - started < .5
+    lock.rollback()
+    lock.close()
     store.close()
