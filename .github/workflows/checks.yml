@@ -4,7 +4,7 @@ on:
   pull_request:
   workflow_dispatch:
 permissions:
-  contents: read
+  contents: write
 jobs:
   test:
     strategy:
@@ -27,22 +27,34 @@ jobs:
       - run: python run.py --smoke
       - name: Build Windows portable preview
         if: runner.os == 'Windows'
-        run: python -m PyInstaller --noconfirm --windowed --name FileDesk --collect-data filedesk run.py
+        run: python -m PyInstaller --noconfirm --clean --onefile --noupx --windowed --name FileDesk --collect-data filedesk run.py
       - name: Test packaged UI import, rename, history and undo
         if: runner.os == 'Windows'
         shell: pwsh
         run: |
           $env:FILEDESK_DATA_DIR = "$env:RUNNER_TEMP/FileDesk-selftest"
-          $process = Start-Process -FilePath dist/FileDesk/FileDesk.exe -ArgumentList '--self-test' -PassThru
-          if (-not $process.WaitForExit(60000)) { $process.Kill(); throw 'Application did not exit' }
+          $standalone = "$env:RUNNER_TEMP/FileDesk-standalone"
+          New-Item -ItemType Directory -Path $standalone -Force | Out-Null
+          Copy-Item dist/FileDesk.exe "$standalone/FileDesk.exe"
+          $process = Start-Process -WorkingDirectory $standalone -FilePath "$standalone/FileDesk.exe" -ArgumentList '--self-test' -PassThru
+          if (-not $process.WaitForExit(120000)) { $process.Kill(); throw 'Application did not exit' }
           if ($process.ExitCode -ne 0) { throw "Application failed: $($process.ExitCode)" }
       - uses: actions/upload-artifact@v4
         if: runner.os == 'Windows'
         with:
           name: FileDesk-Windows-preview
-          path: dist/FileDesk/
+          path: dist/FileDesk.exe
       - uses: actions/upload-artifact@v4
         if: runner.os == 'Windows' && always()
         with:
           name: FileDesk-selftest-report
           path: ${{ runner.temp }}/FileDesk-selftest/
+      - name: Publish standalone executable
+        if: runner.os == 'Windows' && github.event_name == 'push' && github.ref == 'refs/heads/main'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: pwsh
+        run: |
+          $hash = (Get-FileHash dist/FileDesk.exe -Algorithm SHA256).Hash.ToLower()
+          "$hash  FileDesk.exe" | Set-Content -Encoding ascii dist/SHA256SUMS.txt
+          gh release create v0.3.1 dist/FileDesk.exe dist/SHA256SUMS.txt --target $env:GITHUB_SHA --prerelease --title "FileDesk 0.3.1" --notes-file docs/RELEASE_0.3.1.md

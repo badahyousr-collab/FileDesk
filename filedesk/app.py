@@ -3,15 +3,16 @@ import sys
 import threading
 import time
 import logging
+import faulthandler
 import re
 from datetime import datetime, timezone
 from collections import Counter
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
 
-from PySide6.QtCore import QObject, Property, Signal, Slot, QStandardPaths, QTimer, QUrl, QThread
+from PySide6.QtCore import QObject, Property, Signal, Slot, QStandardPaths, QTimer, QUrl, QThread, qInstallMessageHandler, QLockFile
 from PySide6.QtGui import QDesktopServices
-from PySide6.QtWidgets import QApplication, QFileDialog
+from PySide6.QtWidgets import QApplication, QFileDialog, QMessageBox
 from PySide6.QtQml import QQmlApplicationEngine
 
 from filedesk.settings import Settings
@@ -50,9 +51,10 @@ class Backend(QObject):
     rowsChanged = Signal()
     historyChanged = Signal()
 
-    def __init__(self, settings):
+    def __init__(self, settings, journal_path=None):
         super().__init__()
         self.settings = settings
+        self.journal_path = Path(journal_path) if journal_path else settings.path.with_suffix(".history.sqlite3")
         self._dark = settings.get("theme", "dark") != "light"
         self._collapsed = settings.get("collapsed", "false") == "true"
         self._progress = 0
@@ -74,7 +76,7 @@ class Backend(QObject):
         self.preview_timer.setSingleShot(True)
         self.preview_timer.setInterval(350)
         self.preview_timer.timeout.connect(self.preview)
-        journal = Journal(self.settings.path)
+        journal = Journal(self.journal_path)
         journal.recover()
         journal.close()
         self.refresh_history()
@@ -180,7 +182,7 @@ class Backend(QObject):
         self.changed.emit()
 
     def refresh_history(self):
-        journal = Journal(self.settings.path)
+        journal = Journal(self.journal_path)
         try:
             self._history = journal.history()
             self._can_undo = journal.undoable() is not None
@@ -210,7 +212,11 @@ class Backend(QObject):
 
     @Slot(object)
     def task_result(self, value):
-        self._handler(value)
+        try:
+            self._handler(value)
+        except Exception as exc:
+            logging.getLogger("filedesk").exception("Result delivery failed")
+            self.task_error(friendly_error(exc))
 
     @Slot(str)
     def task_error(self, message):
@@ -327,7 +333,7 @@ class Backend(QObject):
             return
         rows = [dict(r) for r in self._rows]
         def action(cancel, report):
-            journal = Journal(self.settings.path)
+            journal = Journal(self.journal_path)
             try:
                 return execute(rows, journal, cancel, report)
             finally:
@@ -358,7 +364,7 @@ class Backend(QObject):
         if not self.canUndo:
             return
         def action(cancel, report):
-            journal = Journal(self.settings.path)
+            journal = Journal(self.journal_path)
             try:
                 return undo(journal, cancel, report)
             finally:
@@ -499,17 +505,36 @@ class Backend(QObject):
 
 
 def main():
+    # Avoid GPU-driver-dependent Qt Quick crashes; users can explicitly override.
+    os.environ.setdefault("QT_QUICK_BACKEND", "software")
     app = QApplication(sys.argv)
     app.setOrganizationName("pipisso")
     app.setApplicationName("FileDesk")
-    app.setApplicationVersion("0.3.0")
+    app.setApplicationVersion("0.3.1")
     base = Path(os.environ.get("FILEDESK_DATA_DIR") or QStandardPaths.writableLocation(QStandardPaths.AppLocalDataLocation))
     base.mkdir(parents=True, exist_ok=True)
+    instance_lock = QLockFile(str(base / "instance.lock"))
+    instance_lock.setStaleLockTime(0)
+    if not instance_lock.tryLock(0):
+        QMessageBox.information(None, "FileDesk", "FileDesk уже открыт. Вернитесь в существующее окно.")
+        return 1
     handler = RotatingFileHandler(base / "filedesk.log", maxBytes=1024 * 1024, backupCount=2, encoding="utf-8")
     handler.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(message)s"))
     logging.getLogger("filedesk").addHandler(handler)
-    settings = Settings(base / "filedesk.sqlite3")
-    backend = Backend(settings)
+    crash_log = (base / "crash.log").open("a", encoding="utf-8")
+    faulthandler.enable(file=crash_log)
+    qInstallMessageHandler(lambda kind, context, message: logging.getLogger("filedesk").warning("Qt: %s", message))
+    settings = Settings(base / "preferences.sqlite3")
+    old_path = base / "filedesk.sqlite3"
+    if old_path.exists() and settings.get("migrated", "") != "yes":
+        old = Settings(old_path)
+        try:
+            for key, default in (("theme", "dark"), ("collapsed", "false"), ("last_directory", "")):
+                settings.set(key, old.get(key, default))
+            settings.set("migrated", "yes")
+        finally:
+            old.close()
+    backend = Backend(settings, old_path)
     app.aboutToQuit.connect(backend.shutdown)
     engine = QQmlApplicationEngine()
     engine.rootContext().setContextProperty("backend", backend)
@@ -525,6 +550,9 @@ def main():
     result = app.exec()
     del engine
     settings.close()
+    qInstallMessageHandler(None)
+    faulthandler.disable()
+    crash_log.close()
     return result
 
 

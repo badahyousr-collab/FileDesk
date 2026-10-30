@@ -27,7 +27,8 @@ class SelfTest(QObject):
         self.extra = self.root / 'Ещё один файл.txt'
         self.extra.write_text('Second file', encoding='utf-8')
         self.stage = 0
-        self.deadline = time.monotonic() + 25
+        self.deadline = time.monotonic() + 50
+        self.navigation_ticks = 0
         self.timer = QTimer(self)
         self.timer.timeout.connect(self.step)
 
@@ -50,6 +51,12 @@ class SelfTest(QObject):
         try:
             assert time.monotonic() < self.deadline, 'UI operation timed out'
             if b.running:
+                # Navigate and write preferences while real file jobs are active.
+                self.navigation_ticks += 1
+                self.window.setProperty('page', self.navigation_ticks % 4)
+                if self.navigation_ticks % 3 == 0:
+                    b.toggleTheme()
+                    b.toggleSidebar()
                 return
             if self.stage == 0:
                 # Exercise the actual QML button -> Python dialog handler -> native path.
@@ -91,6 +98,24 @@ class SelfTest(QObject):
                 assert len(b.history) == 1 and not b.demo
                 self.window.setProperty('page',0)
             elif self.stage == 6:
+                b.clear()
+                stress = self.root / 'queue'
+                stress.mkdir()
+                for i in range(400):
+                    (stress / f'file_{i}.txt').write_bytes(b'content' * 200)
+                b.addPaths([str(stress)])
+            elif self.stage == 7:
+                assert len(b.rows) == 400 and b.canRun
+                self.window.setProperty('page', 0)
+                self.button('renameButton')
+            elif self.stage == 8:
+                assert len(list((self.root/'queue').glob('*_???.txt'))) == 400
+                assert all(r['status'] == 'Готово' for r in b.rows), b.status
+                assert self.navigation_ticks > 0
+                b.undoLast()
+            elif self.stage == 9:
+                assert all((self.root/'queue'/f'file_{i}.txt').exists() for i in range(400))
+                self.window.setProperty('page', 0)
                 self.window.grabWindow().save(str(self.output / 'self-test.png'))
                 self.finish(True)
                 return
