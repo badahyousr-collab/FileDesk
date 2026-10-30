@@ -87,6 +87,14 @@ def test_real_files_through_backend_and_qml(tmp_path):
     assert backend.history[0]['state'] == 'undone'
     backend.clear()
     assert not backend.rows
+    # A Windows inode may be larger than the signed QVariant integer range.
+    backend.set_rows([dict(source=str(source), target=str(source), name=source.name,
+                           newName=source.name, size=0, status='Готово', error='',
+                           stamp=[2**65])])
+    app.processEvents()
+    assert 'stamp' not in backend.rows[0]
+    assert backend._rows[0]['stamp'] == [2**65]
+    backend.clear()
     assert not warnings, warnings
     backend.shutdown()
     window.close()
