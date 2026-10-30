@@ -2,14 +2,14 @@ import os
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 from pathlib import Path
 from PySide6.QtCore import QUrl
-from PySide6.QtGui import QGuiApplication
+from PySide6.QtWidgets import QApplication
 from PySide6.QtQml import QQmlApplicationEngine
 from filedesk.app import Backend
 from filedesk.settings import Settings
 
 
 def test_ui_loads_and_demo_can_stop(tmp_path):
-    app = QGuiApplication.instance() or QGuiApplication([])
+    app = QApplication.instance() or QApplication([])
     store = Settings(tmp_path / "settings.sqlite3")
     backend = Backend(store)
     engine = QQmlApplicationEngine()
@@ -26,7 +26,7 @@ def test_ui_loads_and_demo_can_stop(tmp_path):
             window.setProperty("page", page)
             app.processEvents()
     window.setProperty("page", 0)
-    window.setProperty("demo", True)
+    backend.setDemo(True)
     app.processEvents()
     backend.startDemo()
     backend.tick()
@@ -48,7 +48,7 @@ def test_ui_loads_and_demo_can_stop(tmp_path):
 
 def test_real_files_through_backend_and_qml(tmp_path):
     import time
-    app = QGuiApplication.instance() or QGuiApplication([])
+    app = QApplication.instance() or QApplication([])
     store = Settings(tmp_path / 'settings.sqlite3')
     backend = Backend(store)
     engine = QQmlApplicationEngine()
@@ -68,7 +68,7 @@ def test_real_files_through_backend_and_qml(tmp_path):
     source.write_text('keep this content', encoding='utf-8')
     backend.addUrls([QUrl.fromLocalFile(str(source))])
     wait()
-    assert len(backend.rows) == 1 and not backend.canRun, backend.status
+    assert len(backend.rows) == 1 and backend.canRun, backend.status
     backend.configure('result_{n:03d}', 1, '', '')
     backend.preview()
     wait()
@@ -92,4 +92,37 @@ def test_real_files_through_backend_and_qml(tmp_path):
     window.close()
     del window
     del engine
+    store.close()
+
+
+def test_packaged_entrypoint_workflow(tmp_path):
+    import subprocess
+    import sys
+    import json
+    env = dict(os.environ, FILEDESK_DATA_DIR=str(tmp_path / 'appdata'), QT_QUICK_BACKEND='software')
+    result = subprocess.run([sys.executable, 'run.py', '--self-test'], cwd=Path(__file__).resolve().parents[1], env=env, capture_output=True, text=True, timeout=35)
+    report = json.loads((tmp_path / 'appdata' / 'self-test.json').read_text(encoding='utf-8'))
+    assert result.returncode == 0 and report['success'], (report, result.stderr)
+
+
+def test_invalid_import_is_visible_and_demo_history_is_isolated(tmp_path):
+    app = QApplication.instance() or QApplication([])
+    store = Settings(tmp_path / 'settings.sqlite3')
+    backend = Backend(store)
+    backend.addPaths(['https://example.com/file.txt'])
+    assert backend.notice and not backend.rows
+    backend.setDemo(True)
+    backend.startDemo()
+    for _ in range(10):
+        backend.tick()
+    assert len(backend.history) == 3
+    backend.configure('{name}_{n:03d}', 4, '', '')
+    backend.startDemo()
+    for _ in range(10):
+        backend.tick()
+    backend.undoLast()
+    assert sum(r['state'] == 'undone' for r in backend.history) == 3
+    assert sum(r['state'] == 'done' for r in backend.history) == 3
+    backend.setDemo(False)
+    assert backend.history == []
     store.close()
